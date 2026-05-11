@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 """
-StockMiner - Hybrid Stock Analyzer with Caching
-Efficient stock analysis with local data storage
+StockMiner - Hybrid Stock Analyzer with Confirmation Signals
 """
 
 import sys
@@ -18,11 +17,11 @@ def clear_screen():
 def print_header():
     print("\n" + "="*70)
     print("  🚀 STOCKMINER - Hybrid Stock Analyzer")
-    print("  Efficient Caching + Delta Updates")
+    print("  Confirmation Signals + Efficient Caching")
     print("="*70)
     print("\n  ✅ Stock lists: Dynamic from Futu")
-    print("  ✅ Historical data: Yahoo Finance (cached locally)")
-    print("  ✅ Smart caching: Only downloads new data")
+    print("  ✅ Historical data: Yahoo Finance (cached)")
+    print("  ✅ Confirmation signals: Multi-indicator confirmation")
 
 def main():
     clear_screen()
@@ -41,7 +40,7 @@ def main():
         print("     1. Hong Kong Stocks - Quick (100 stocks)")
         print("     2. US Stocks - Quick (100 stocks)")
         print("")
-        print("   🔍 FULL ANALYSIS (~3-5 min first time, faster after):")
+        print("   🔍 FULL ANALYSIS (~3-5 min first time):")
         print("     3. Hong Kong Stocks - FULL (All active)")
         print("     4. US Stocks - FULL (All active)")
         print("")
@@ -62,7 +61,7 @@ def main():
         
         elif choice == '1':
             print("\n📈 Quick Analysis: Hong Kong Stocks...")
-            rising, falling = analyzer.analyze(
+            confirmed_buy, confirmed_sell = analyzer.analyze(
                 "HK_STOCKS", 
                 max_stocks=100,
                 top_n=15,
@@ -72,7 +71,7 @@ def main():
         
         elif choice == '2':
             print("\n📈 Quick Analysis: US Stocks...")
-            rising, falling = analyzer.analyze(
+            confirmed_buy, confirmed_sell = analyzer.analyze(
                 "US_STOCKS", 
                 max_stocks=100,
                 top_n=15,
@@ -84,7 +83,7 @@ def main():
             confirm = input("\n⚠️  FULL analysis of ALL HK stocks. Continue? (y/n): ")
             if confirm.lower() == 'y':
                 force = input("🔄 Force refresh all data? (y/n - will use cache if available): ").lower() == 'y'
-                rising, falling = analyzer.analyze(
+                confirmed_buy, confirmed_sell = analyzer.analyze(
                     "HK_STOCKS", 
                     max_stocks=None,
                     top_n=20,
@@ -97,7 +96,7 @@ def main():
             confirm = input("\n⚠️  FULL analysis of ALL US stocks. Continue? (y/n): ")
             if confirm.lower() == 'y':
                 force = input("🔄 Force refresh all data? (y/n - will use cache if available): ").lower() == 'y'
-                rising, falling = analyzer.analyze(
+                confirmed_buy, confirmed_sell = analyzer.analyze(
                     "US_STOCKS", 
                     max_stocks=None,
                     top_n=20,

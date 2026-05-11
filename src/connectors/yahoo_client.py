@@ -1,5 +1,5 @@
 """
-Yahoo Finance connector with delta update support
+Yahoo Finance connector with caching and delta updates
 """
 
 import yfinance as yf
@@ -18,6 +18,8 @@ class YahooClient:
     
     def __init__(self):
         self.cache = DataCache()
+        self.name_cache = {}
+        self.cache_duration = 3600
         self.last_request_time = 0
         
     def _rate_limit(self):
@@ -38,6 +40,49 @@ class YahooClient:
         elif code.startswith("US."):
             return code[3:]
         return code
+    
+    def get_stock_name(self, code: str) -> str:
+        """Get display name for a single stock"""
+        ticker = self._convert_futu_ticker_to_yahoo(code)
+        
+        # Check cache
+        if ticker in self.name_cache:
+            cache_time = self.name_cache[ticker].get('timestamp', 0)
+            if time.time() - cache_time < self.cache_duration:
+                return self.name_cache[ticker]['name']
+        
+        try:
+            self._rate_limit()
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            name = info.get('longName', info.get('shortName', ticker))
+            
+            if not name or name == ticker:
+                hist = stock.history(period='5d')
+                if not hist.empty:
+                    name = f"Stock {ticker}"
+                else:
+                    name = ticker
+            
+            self.name_cache[ticker] = {
+                'name': name if name else ticker,
+                'timestamp': time.time()
+            }
+            return name if name else ticker
+            
+        except Exception as e:
+            logger.debug(f"Error getting name for {code}: {e}")
+            return ticker
+    
+    def get_stock_names_batch(self, codes: List[str]) -> Dict[str, str]:
+        """Get names for multiple stocks with caching"""
+        result = {}
+        for i, code in enumerate(codes):
+            print(f"\r   Fetching names: {i+1}/{len(codes)} - {code}", end="", flush=True)
+            result[code] = self.get_stock_name(code)
+            time.sleep(0.03)
+        print()
+        return result
     
     def get_history_kline(self, code: str, start_date: str, end_date: str, use_cache: bool = True) -> pd.DataFrame:
         """Get historical data with caching support"""
@@ -141,6 +186,7 @@ class YahooClient:
     def clear_cache(self):
         """Clear all cached data"""
         self.cache.clear_cache()
+        self.name_cache = {}
     
     def save_cache(self):
         """Save cache to disk"""
