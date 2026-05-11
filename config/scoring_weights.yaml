@@ -1,0 +1,26 @@
+rise_scoring:
+  weight_rsi_oversold: 15
+  weight_macd_bullish: 12
+  weight_ma_bullish: 8
+  weight_golden_cross: 10
+  weight_bb_support: 10
+  weight_volume_uptrend: 8
+  weight_adx_strong_trend: 10
+  weight_momentum_positive: 8
+
+fall_scoring:
+  weight_rsi_overbought: 15
+  weight_macd_bearish: 12
+  weight_ma_bearish: 8
+  weight_death_cross: 10
+  weight_bb_resistance: 10
+  weight_volume_downtrend: 8
+  weight_adx_strong_downtrend: 10
+  weight_momentum_negative: 8
+
+thresholds:
+  rsi_oversold: 30
+  rsi_overbought: 70
+  adx_strong_trend: 25
+  volume_surge_ratio: 1.5
+  momentum_threshold: 5.0

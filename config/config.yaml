@@ -1,0 +1,44 @@
+app:
+  name: "StockMiner"
+  version: "1.0.0"
+  environment: "production"
+
+futu_api:
+  host: "127.0.0.1"
+  port: 11111
+  connection_timeout: 30
+  max_retries: 3
+  rate_limit_per_second: 30
+
+data:
+  cache_dir: "data/cache"
+  report_dir: "data/reports"
+  log_dir: "data/logs"
+  historical_days: 365
+  incremental_update: true
+
+markets:
+  active_markets:
+    - "HK_STOCKS"
+    - "US_STOCKS"
+  default_market: "HK_STOCKS"
+
+filters:
+  min_volume: 1000000
+  min_turnover: 10000000
+  min_price: 1.0
+  max_price: 10000.0
+
+analysis:
+  top_n_results: 20
+  min_history_days: 50
+  prediction_horizon: 10
+  confidence_threshold: 0.6
+
+performance:
+  parallel_processing: true
+  max_workers: 4
+  batch_size: 50
+  
+logging:
+  level: "INFO"
