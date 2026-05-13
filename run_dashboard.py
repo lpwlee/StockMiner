@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+
 """
 Launch the StockMiner Interactive Dashboard
 """

@@ -1,77 +1,133 @@
 """
-Interactive Dashboard with Candlestick Charts and Technical Analysis
+Dashboard - Dark mode optimized with readable filters
 """
 
 import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import dash
-from dash import dcc, html, Input, Output
+from dash import dcc, html, Input, Output, State, callback_context
 import dash_bootstrap_components as dbc
-from datetime import datetime, timedelta
+from datetime import datetime
 import webbrowser
 import threading
 import time
+import json
+import os
+import re
 
 from src.core.analyzer_hybrid import HybridAnalyzer
+from src.ui.components.sorting import sort_stocks, get_sort_options
+from src.ui.components.filtering import filter_stocks, get_filter_options
+from src.ui.components.display import create_stock_table, create_stock_info_card, create_dropdown_options
+from src.ui.components.charts import create_candlestick_chart
+
+# Global state
+analysis_lock = threading.Lock()
+analysis_in_progress = False
+analysis_complete = False
+analysis_data = None
 
 class StockDashboard:
-    """Interactive dashboard for stock analysis"""
-    
     def __init__(self):
         self.analyzer = HybridAnalyzer()
-        self.analyzed_stocks = None
-        self.current_data = None
         self.app = None
+        self.stock_list = []
+        self.bilingual_names = {}
+        self.load_cached_data()
+        self.load_cached_names()
+    
+    def load_cached_data(self):
+        """Load cached analysis data"""
+        global analysis_data
+        self.analyzer.load_cached_data()
+        if self.analyzer.analyzed_stocks is not None:
+            analysis_data = self.analyzer.analyzed_stocks
+            print(f"✅ Loaded {len(analysis_data)} stocks from cache")
+    
+    def load_cached_names(self):
+        """Load cached company names"""
+        cache_file = "data/cache/company_names.json"
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    self.bilingual_names = json.load(f)
+                print(f"✅ Loaded {len(self.bilingual_names)} bilingual company names")
+                return True
+            except Exception as e:
+                print(f"Error loading names: {e}")
+        return False
+    
+    def get_display_name(self, code):
+        """Get bilingual display name"""
+        if code in self.bilingual_names:
+            name = self.bilingual_names[code]
+            return name if name else code.split('.')[-1]
+        return code.split('.')[-1]
+    
+    def run_full_analysis(self):
+        """Run complete analysis in background"""
+        global analysis_in_progress, analysis_complete, analysis_data
         
-    def load_analysis_data(self):
-        """Load or run analysis to get stock data"""
-        print("\n📊 Loading stock analysis data...")
+        with analysis_lock:
+            if analysis_in_progress:
+                return
+            analysis_in_progress = True
+            analysis_complete = False
         
-        if self.analyzed_stocks is None:
-            confirmed_buy, confirmed_sell = self.analyzer.analyze(
+        try:
+            if not self.stock_list:
+                self.stock_list = self.analyzer.get_active_stock_list(min_volume=200000)
+                print(f"✅ Found {len(self.stock_list)} active stocks")
+            
+            if not self.bilingual_names:
+                self.bilingual_names = self.analyzer.fetch_company_names(self.stock_list)
+                with open("data/cache/company_names.json", "w", encoding='utf-8') as f:
+                    json.dump(self.bilingual_names, f, ensure_ascii=False, indent=2)
+                print(f"✅ Fetched {len(self.bilingual_names)} bilingual company names")
+            
+            simple_names = {code: self.get_display_name(code) for code in self.stock_list}
+            
+            self.analyzer.analyze(
                 "HK_STOCKS",
-                max_stocks=200,
-                top_n=50,
-                min_volume=200000,
+                self.stock_list,
+                simple_names,
                 force_refresh=False
             )
             
-            all_results = pd.DataFrame(self.analyzer.all_results)
-            self.analyzed_stocks = all_results
-        
-        return self.analyzed_stocks
+            analysis_data = self.analyzer.analyzed_stocks
+            analysis_complete = True
+            
+        except Exception as e:
+            print(f"Analysis error: {e}")
+            analysis_complete = False
+        finally:
+            analysis_in_progress = False
     
-    def get_filtered_stocks(self, filter_type):
-        """Get stocks based on filter type"""
-        if self.analyzed_stocks is None or self.analyzed_stocks.empty:
+    def get_filtered_sorted_stocks(self, filter_type, sort_by):
+        """Get filtered and sorted stocks"""
+        global analysis_data
+        if analysis_data is None or analysis_data.empty:
             return []
         
-        if filter_type == "buy":
-            # Priority: Bullish Divergence first, then oversold
-            filtered = self.analyzed_stocks[
-                (self.analyzed_stocks['Confirm_Buy'] == True) | 
-                (self.analyzed_stocks['Bullish_Divergence'] == True) |
-                (self.analyzed_stocks['Net_Score'] > 20)
-            ].nlargest(30, 'Buy_Strength')
-        elif filter_type == "sell":
-            # Priority: Bearish Divergence first, then overbought
-            filtered = self.analyzed_stocks[
-                (self.analyzed_stocks['Confirm_Sell'] == True) | 
-                (self.analyzed_stocks['Bearish_Divergence'] == True) |
-                (self.analyzed_stocks['Net_Score'] < -20)
-            ].nsmallest(30, 'Net_Score')
-        else:
-            filtered = self.analyzed_stocks.nlargest(50, 'Volume_Ratio')
+        df = analysis_data
+        filtered = filter_stocks(df, filter_type)
+        sorted_df = sort_stocks(filtered, sort_by)
+        sorted_df['Display_Name'] = sorted_df['Code'].apply(self.get_display_name)
         
-        return filtered[['Code', 'Name', 'Price', 'RSI', 'Return_10D', 'Net_Score']].to_dict('records')
+        result_cols = ['Code', 'Display_Name', 'Price', 'RSI', 'Return_10D', 
+                       'Rise_Score', 'Fall_Score', 'Net_Score', 
+                       'Divergence_Type', 'Divergence_Strength', 
+                       'Signal_Type', 'Signal_Strength']
+        
+        return sorted_df[result_cols].to_dict('records')
     
-    def get_candlestick_chart(self, stock_code, days=90):
-        """Generate candlestick chart with technical indicators"""
+    def get_chart_and_info(self, stock_code):
+        """Get chart and info for a stock"""
+        global analysis_data
+        if not stock_code:
+            return None, None
         
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=days)
+        start_date = end_date - pd.Timedelta(days=120)
         
         data = self.analyzer.yahoo_client.get_history_kline(
             stock_code,
@@ -81,270 +137,182 @@ class StockDashboard:
         )
         
         if data.empty:
-            return go.Figure(), None
+            return None, None
         
-        self.current_data = data
-        
-        # Calculate current RSI
-        close_prices = data['close'].values
-        if len(close_prices) >= 15:
-            deltas = np.diff(close_prices[-15:])
-            gains = deltas[deltas > 0].sum() / 14 if len(deltas[deltas > 0]) > 0 else 0
-            losses = abs(deltas[deltas < 0].sum()) / 14 if len(deltas[deltas < 0]) > 0 else 0
-            rs = gains / losses if losses != 0 else 100
-            current_rsi = 100 - (100 / (1 + rs))
-        else:
-            current_rsi = 50
-        
-        # Get stock info
         stock_info = None
-        if self.analyzed_stocks is not None and not self.analyzed_stocks.empty:
-            stock_match = self.analyzed_stocks[self.analyzed_stocks['Code'] == stock_code]
-            if not stock_match.empty:
-                stock_info = stock_match.iloc[0].to_dict()
-                stock_name = stock_info['Name']
-            else:
-                stock_name = stock_code
-        else:
-            stock_name = stock_code
+        display_name = self.get_display_name(stock_code)
         
-        # Create subplots
-        fig = make_subplots(
-            rows=3, cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.05,
-            row_heights=[0.6, 0.2, 0.2],
-            subplot_titles=(f'{stock_code} - {stock_name}', 'Volume', 'RSI (14)')
-        )
+        if analysis_data is not None:
+            match = analysis_data[analysis_data['Code'] == stock_code]
+            if not match.empty:
+                stock_info = match.iloc[0].to_dict()
         
-        # Candlestick chart
-        fig.add_trace(
-            go.Candlestick(
-                x=data['time_key'],
-                open=data['open'],
-                high=data['high'],
-                low=data['low'],
-                close=data['close'],
-                name='Price',
-                showlegend=False
-            ),
-            row=1, col=1
-        )
-        
-        # Add moving averages
-        if len(data) >= 20:
-            data['SMA_20'] = data['close'].rolling(window=20).mean()
-            fig.add_trace(
-                go.Scatter(
-                    x=data['time_key'],
-                    y=data['SMA_20'],
-                    name='SMA 20',
-                    line=dict(color='orange', width=1.5)
-                ),
-                row=1, col=1
-            )
-        
-        if len(data) >= 50:
-            data['SMA_50'] = data['close'].rolling(window=50).mean()
-            fig.add_trace(
-                go.Scatter(
-                    x=data['time_key'],
-                    y=data['SMA_50'],
-                    name='SMA 50',
-                    line=dict(color='blue', width=1.5)
-                ),
-                row=1, col=1
-            )
-        
-        # Volume bars
-        colors = ['red' if close < open else 'green' for close, open in zip(data['close'], data['open'])]
-        fig.add_trace(
-            go.Bar(
-                x=data['time_key'],
-                y=data['volume'],
-                name='Volume',
-                marker_color=colors,
-                opacity=0.5
-            ),
-            row=2, col=1
-        )
-        
-        # RSI indicator
-        delta = data['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        data['RSI'] = 100 - (100 / (1 + rs))
-        
-        fig.add_trace(
-            go.Scatter(
-                x=data['time_key'],
-                y=data['RSI'],
-                name='RSI',
-                line=dict(color='purple', width=2)
-            ),
-            row=3, col=1
-        )
-        
-        # Add RSI levels
-        fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1, annotation_text="Overbought")
-        fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1, annotation_text="Oversold")
-        
-        # Update layout
-        current_price = data['close'].iloc[-1]
-        fig.update_layout(
-            title=f'{stock_code} - {stock_name} | Current: ${current_price:.2f} | RSI: {current_rsi:.1f}',
-            template='plotly_dark',
-            height=800,
-            showlegend=True,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
+        fig = create_candlestick_chart(data, stock_code, display_name, stock_info)
         
         return fig, stock_info
     
     def create_dashboard(self):
-        """Create Dash dashboard"""
-        
-        self.load_analysis_data()
-        
-        initial_stocks = self.get_filtered_stocks("buy")
-        initial_options = [{'label': f"{s['Code']} - {s['Name'][:30]} (${s['Price']:.2f})", 'value': s['Code']} 
-                          for s in initial_stocks[:20]]
-        
+        """Create Dash dashboard with readable dark mode controls"""
         self.app = dash.Dash(__name__, external_stylesheets=[dbc.themes.DARKLY])
         
         self.app.layout = dbc.Container([
             dbc.Row([
                 dbc.Col(html.H1("📈 StockMiner - Divergence Trading Dashboard", 
-                               className="text-center text-primary mb-4"), width=12)
+                               className="text-center text-primary mb-3"), width=12)
             ]),
             
             dbc.Row([
                 dbc.Col([
                     dbc.Card([
-                        dbc.CardHeader("🎯 Stock Selection"),
+                        dbc.CardHeader("🎮 Control Panel", style={"color": "#ffffff", "backgroundColor": "#2c3e50"}),
                         dbc.CardBody([
-                            html.Label("Select Signal Type:", className="fw-bold"),
+                            html.H6("Analysis Control", className="fw-bold text-center mb-3", style={"color": "#ffffff"}),
+                            dbc.Button("🚀 Run Complete Analysis", id="analyze-btn", 
+                                      color="success", className="w-100 mb-3", size="lg"),
+                            html.Div(id="status-text", className="text-info small text-center mb-3"),
+                            
+                            html.Hr(style={"borderColor": "#444"}),
+                            
+                            html.H6("Filter & Sort", className="fw-bold mb-2", style={"color": "#ffffff"}),
+                            html.Label("Filter by:", className="fw-bold small", style={"color": "#aaaaaa"}),
                             dcc.RadioItems(
-                                id='signal-type',
-                                options=[
-                                    {'label': '🟢 Buy Signals (Divergence/Oversold)', 'value': 'buy'},
-                                    {'label': '🔴 Sell Signals (Divergence/Overbought)', 'value': 'sell'},
-                                    {'label': '📊 All Active Stocks', 'value': 'all'}
-                                ],
+                                id='filter-type',
+                                options=get_filter_options(),
                                 value='buy',
                                 inline=True,
-                                className="mb-3"
+                                className="mb-2",
+                                labelStyle={"color": "#ffffff", "marginRight": "15px"},
+                                inputStyle={"marginRight": "5px"}
                             ),
-                            html.Label("Select Stock:", className="fw-bold mt-2"),
+                            
+                            html.Label("Sort by:", className="fw-bold small mt-2", style={"color": "#aaaaaa"}),
                             dcc.Dropdown(
-                                id='stock-dropdown',
-                                options=initial_options,
-                                placeholder='Select a stock to analyze...',
-                                className="mb-3"
+                                id='sort-by',
+                                options=get_sort_options(),
+                                value='divergence_strength',
+                                className="mb-3",
+                                style={
+                                    'backgroundColor': '#2c3e50',
+                                    'color': '#ffffff',
+                                    'border': '1px solid #555'
+                                }
                             ),
-                            html.Div(id='stock-info', className="mt-3"),
+                            
+                            html.Hr(style={"borderColor": "#444"}),
+                            
+                            html.Label("Select Stock:", className="fw-bold", style={"color": "#ffffff"}),
+                            dcc.Dropdown(
+                                id='stock-dropdown', 
+                                placeholder='Select a stock...',
+                                style={
+                                    'backgroundColor': '#2c3e50',
+                                    'color': '#ffffff',
+                                    'border': '1px solid #555'
+                                }
+                            ),
                         ])
-                    ], className="mb-4")
+                    ], className="mb-4", style={"backgroundColor": "#1e1e1e", "border": "1px solid #444"})
                 ], width=3),
                 
                 dbc.Col([
                     dbc.Card([
-                        dbc.CardHeader("📊 Technical Analysis Chart"),
+                        dbc.CardHeader("📊 Divergence Chart", style={"color": "#ffffff", "backgroundColor": "#2c3e50"}),
                         dbc.CardBody([
-                            dcc.Loading(
-                                id="loading-chart",
-                                type="circle",
-                                children=[dcc.Graph(id='candlestick-chart')]
-                            )
+                            dcc.Graph(id='chart', config={'responsive': True})
                         ])
-                    ])
+                    ], style={"backgroundColor": "#1e1e1e", "border": "1px solid #444"})
                 ], width=9)
             ]),
             
             dbc.Row([
                 dbc.Col([
                     dbc.Card([
-                        dbc.CardHeader("📈 Key Indicators"),
-                        dbc.CardBody(id='indicators-summary')
-                    ])
+                        dbc.CardHeader("📈 Stock List - Click on Stock Code to Load Chart", style={"color": "#ffffff", "backgroundColor": "#2c3e50"}),
+                        dbc.CardBody([
+                            html.Div(id='stock-list-table', className="table-responsive"),
+                            html.Div(id='stock-info')
+                        ])
+                    ], style={"backgroundColor": "#1e1e1e", "border": "1px solid #444"})
                 ], width=12)
             ], className="mt-3"),
-            
-            dbc.Row([
-                dbc.Col([
-                    html.Footer(
-                        "⚠️ Divergence signals are leading indicators. Wait for confirmation.",
-                        className="text-center text-muted mt-4"
-                    )
-                ], width=12)
-            ])
-        ], fluid=True, className="p-4")
+        ], fluid=True, className="p-4", style={"backgroundColor": "#121212"})
         
+        # Main callback for updates
         @self.app.callback(
-            Output('stock-dropdown', 'options'),
-            [Input('signal-type', 'value')]
+            [Output('status-text', 'children'),
+             Output('stock-dropdown', 'options'),
+             Output('stock-list-table', 'children'),
+             Output('analyze-btn', 'disabled')],
+            [Input('analyze-btn', 'n_clicks'),
+             Input('filter-type', 'value'),
+             Input('sort-by', 'value')]
         )
-        def update_stock_list(signal_type):
-            stocks = self.get_filtered_stocks(signal_type)
-            return [{'label': f"{s['Code']} - {s['Name'][:30]} (${s['Price']:.2f})", 'value': s['Code']} 
-                    for s in stocks[:50]]
+        def update_all(analyze_clicks, filter_type, sort_by):
+            global analysis_in_progress, analysis_complete, analysis_data
+            
+            ctx = callback_context
+            trigger = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else 'none'
+            
+            if trigger == 'analyze-btn' and not analysis_in_progress and not analysis_complete:
+                thread = threading.Thread(target=self.run_full_analysis)
+                thread.start()
+                return "🔄 Analysis started! Check console for progress.", [], html.P("Analyzing... Please wait."), True
+            
+            if analysis_in_progress:
+                return "🔄 Analysis in progress...", [], html.P("Analyzing stocks..."), True
+            
+            if (analysis_complete or analysis_data is not None) and analysis_data is not None:
+                stocks = self.get_filtered_sorted_stocks(filter_type, sort_by)
+                options = create_dropdown_options(stocks)
+                stock_table, _ = create_stock_table(stocks)
+                total = len(analysis_data)
+                showing = len(stocks)
+                return f"✅ Ready - {showing} stocks showing ({total} total)", options, stock_table, False
+            
+            return "Click 'Run Complete Analysis' to start", [], html.P("No data. Run analysis first."), False
         
+        # Callback to handle button clicks
         @self.app.callback(
-            [Output('candlestick-chart', 'figure'),
-             Output('stock-info', 'children'),
-             Output('indicators-summary', 'children')],
+            Output('stock-dropdown', 'value'),
+            [Input({'type': 'stock-btn', 'index': dash.ALL}, 'n_clicks')],
+            prevent_initial_call=True
+        )
+        def handle_button_clicks(n_clicks_list):
+            ctx = callback_context
+            if ctx.triggered:
+                trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
+                match = re.search(r'"index":"([^"]+)"', trigger_id)
+                if match:
+                    stock_code = match.group(1).replace('-', '.')
+                    print(f"Button clicked: {stock_code}")
+                    return stock_code
+            return dash.no_update
+        
+        # Callback for dropdown selection
+        @self.app.callback(
+            [Output('chart', 'figure'),
+             Output('stock-info', 'children')],
             [Input('stock-dropdown', 'value')]
         )
-        def update_chart(stock_code):
+        def update_chart_from_dropdown(stock_code):
             if not stock_code:
-                return go.Figure(), "", ""
+                return {}, html.P("Select a stock from the dropdown to view details", className="text-muted")
             
-            fig, stock_info = self.get_candlestick_chart(stock_code)
+            fig, stock_info = self.get_chart_and_info(stock_code)
             
-            if stock_info and isinstance(stock_info, dict):
-                # Check for divergence
-                div_text = ""
-                if stock_info.get('Bullish_Divergence'):
-                    div_text = f"🔥 BULLISH DIVERGENCE DETECTED (Strength: {stock_info.get('Bullish_Strength', 0)})"
-                elif stock_info.get('Bearish_Divergence'):
-                    div_text = f"⚠️ BEARISH DIVERGENCE DETECTED (Strength: {stock_info.get('Bearish_Strength', 0)})"
-                
-                info_card = dbc.Card([
-                    dbc.CardBody([
-                        html.H5(f"📊 {stock_info['Code']} - {stock_info['Name']}", className="card-title"),
-                        html.Hr(),
-                        dbc.Row([
-                            dbc.Col([html.Strong("Price:"), html.Br(), html.H4(f"${stock_info['Price']:.2f}")], width=4),
-                            dbc.Col([html.Strong("RSI:"), html.Br(), html.H4(f"{stock_info['RSI']:.0f}")], width=4),
-                            dbc.Col([html.Strong("10D Return:"), html.Br(), html.H4(f"{stock_info['Return_10D']:+.1f}%")], width=4),
-                        ]),
-                        html.Hr(),
-                        dbc.Row([
-                            dbc.Col([html.Strong("Rise Score:"), html.P(f"{stock_info['Rise_Score']:.0f}%")], width=6),
-                            dbc.Col([html.Strong("Fall Score:"), html.P(f"{stock_info['Fall_Score']:.0f}%")], width=6),
-                        ]),
-                        html.Hr(),
-                        dbc.Alert(div_text, color="warning" if div_text else "secondary"),
-                        html.Small(stock_info.get('Signal_Reasons', ''), className="text-muted")
-                    ])
-                ])
-            else:
-                info_card = dbc.Card([dbc.CardBody([html.P("No data available")])])
+            if fig is None:
+                return {}, html.P(f"No data available for {stock_code}", className="text-warning")
             
-            indicators_card = dbc.Row([
-                dbc.Col(dbc.Card(dbc.CardBody([html.H4("Strategy"), html.P("Divergence + RSI + Volume")])), width=6),
-                dbc.Col(dbc.Card(dbc.CardBody([html.H4("Action"), html.P("Wait for confirmation candle")])), width=6),
-            ])
+            info_card = create_stock_info_card(stock_info, self.get_display_name(stock_code))
             
-            return fig, info_card, indicators_card
+            return fig, info_card
         
         return self.app
     
     def run(self, port=8050):
-        print("\n" + "="*60)
-        print("🚀 Starting Divergence Trading Dashboard...")
-        print("="*60)
+        print("\n" + "="*70)
+        print("🚀 StockMiner Dashboard - Dark Mode Optimized")
+        print("="*70)
         
         app = self.create_dashboard()
         
@@ -355,10 +323,13 @@ class StockDashboard:
         threading.Thread(target=open_browser, daemon=True).start()
         
         print(f"\n✅ Dashboard: http://localhost:{port}")
+        print("\n📊 Instructions:")
+        print("   • Use dropdown to select stocks - chart loads automatically")
+        print("   • Click on blue underlined stock codes in the table - also loads chart")
+        print("   • Filter and sort using the controls above")
+        print("\n   Press Ctrl+C to stop\n")
+        
         app.run(debug=False, port=port)
-    
-    def stop(self):
-        self.analyzer.disconnect()
 
 if __name__ == "__main__":
     dashboard = StockDashboard()
